@@ -13,17 +13,15 @@ import {
 async function getAcpSessionAndCheckPermission(
   toolName: string,
   context: any,
-  sessionMap: Map<string, string>,
+  sessionMap: Map<string, { cancelled: boolean; currentMode: string; cwd?: string | undefined; }>,
   opencodeAdapter: OpenCodeAdapter,
   logger: Logger,
 ): Promise<{ acpSessionId: string | undefined; error?: string }> {
   logger.info(`Tool handler context: ${JSON.stringify(context, null, 2)}`);
 
-  const acpSessionId = Array.from(sessionMap.entries()).find(
-    ([_, opencodeId]) => opencodeId === context.sessionId,
-  )?.[0];
+  const acpSessionId = context.sessionId;
 
-  if (!acpSessionId) {
+  if (!acpSessionId || !sessionMap.has(acpSessionId)) {
     const errorMessage = `No ACP session found for OpenCode session ${context.sessionId}`;
     logger.error(errorMessage);
     return { acpSessionId: undefined, error: errorMessage };
@@ -44,7 +42,7 @@ export function registerTools(
   opencodeClient: any,
   logger: Logger,
   clientConnection: ACPClientConnection,
-  sessionMap: Map<string, string>,
+  sessionMap: Map<string, { cancelled: boolean; currentMode: string; cwd?: string | undefined; }>,
   opencodeAdapter: OpenCodeAdapter,
 ) {
   const readFileTool = {
@@ -66,14 +64,14 @@ export function registerTools(
       }
 
       try {
-        const fileContent = await clientConnection.readTextFile({
+        const result = await clientConnection.readTextFile({
           path: input.path,
           sessionId: acpSessionId,
         });
-        return { result: fileContent.content, location: { path: input.path } as ToolCallLocation };
-      } catch (error: any) {
-        logger.error(`Failed to read file: ${error.message}`, error);
-        return { result: `Error: ${error.message}` };
+        return { result: result.content, location: { path: input.path } as ToolCallLocation };
+      } catch (err: any) {
+        logger.error(`Failed to read file: ${err instanceof Error ? err.message : String(err)}`, err);
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   };
@@ -89,44 +87,32 @@ export function registerTools(
       content: z.string().describe('The content to write to the file.'),
     }),
     handler: async (input: { path: string; content: string }, context: any) => {
-      logger.info(`Tool handler context: ${JSON.stringify(context, null, 2)}`);
-
-      const acpSessionId = Array.from(sessionMap.entries()).find(
-        ([_, opencodeId]) => opencodeId === context.sessionId,
-      )?.[0];
-
-      if (!acpSessionId) {
-        const errorMessage = `No ACP session found for OpenCode session ${context.sessionId}`;
-        logger.error(errorMessage);
-        return {
-          result: `Error: ${errorMessage}`,
-        };
-      }
-      try {
-        await opencodeAdapter.requestToolPermission('write_file', acpSessionId);
-      } catch (error: any) {
-        return { result: `Error: ${error.message}` };
+      const { acpSessionId, error } = await getAcpSessionAndCheckPermission(
+        'write_file',
+        context,
+        sessionMap,
+        opencodeAdapter,
+        logger,
+      );
+      if (error || !acpSessionId) {
+        return { result: `Error: ${error}` };
       }
 
       try {
-        await clientConnection.writeTextFile({
-          path: input.path,
-          content: input.content,
-          sessionId: acpSessionId,
-        });
         const oldContent = await clientConnection
           .readTextFile({
             path: input.path,
             sessionId: acpSessionId,
           })
           .then((res) => res.content)
-          .catch(() => undefined); // Read old content if file exists
+          .catch(() => undefined);
 
         await clientConnection.writeTextFile({
           path: input.path,
           content: input.content,
           sessionId: acpSessionId,
         });
+
         return {
           result: `Successfully wrote to file: ${input.path}`,
           diff: {
@@ -136,9 +122,9 @@ export function registerTools(
           },
           location: { path: input.path } as ToolCallLocation,
         };
-      } catch (error: any) {
-        logger.error(`Failed to write file: ${error.message}`, error);
-        return { result: `Error: ${error.message}` };
+      } catch (err: any) {
+        logger.error(`Failed to write file: ${err instanceof Error ? err.message : String(err)}`, err);
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   };
@@ -166,18 +152,19 @@ export function registerTools(
       }
 
       try {
-        await clientConnection.writeTextFile({
-          path: input.path,
-          content: input.content,
-          sessionId: acpSessionId,
-        });
         const oldContent = await clientConnection
           .readTextFile({
             path: input.path,
             sessionId: acpSessionId,
           })
           .then((res) => res.content)
-          .catch(() => undefined); // Read old content if file exists
+          .catch(() => undefined);
+
+        await clientConnection.writeTextFile({
+          path: input.path,
+          content: input.content,
+          sessionId: acpSessionId,
+        });
 
         return {
           result: `Successfully edited file: ${input.path}`,
@@ -188,9 +175,9 @@ export function registerTools(
           },
           location: { path: input.path } as ToolCallLocation,
         };
-      } catch (error: any) {
-        logger.error(`Failed to edit file: ${error.message}`, error);
-        return { result: `Error: ${error.message}` };
+      } catch (err: any) {
+        logger.error(`Failed to edit file: ${err instanceof Error ? err.message : String(err)}`, err);
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   };
@@ -229,7 +216,7 @@ export function registerTools(
 
       try {
         if (!clientConnection.createTerminal) {
-          return { result: `Error: Terminal operations are not supported by the current client connection.` };
+          throw new Error('Terminal operations are not supported by the current client connection.');
         }
         const { terminalId } = await clientConnection.createTerminal({
           sessionId: acpSessionId,
@@ -245,7 +232,7 @@ export function registerTools(
           };
         } else {
           if (!clientConnection.waitForTerminalExit || !clientConnection.terminalOutput) {
-            return { result: `Error: Terminal operations are not supported by the current client connection.` };
+            throw new Error('Terminal operations are not supported by the current client connection.');
           }
           const exitResponse = await clientConnection.waitForTerminalExit({
             sessionId: acpSessionId,
@@ -269,9 +256,9 @@ export function registerTools(
             terminalId: terminalId,
           };
         }
-      } catch (error: any) {
-        logger.error(`Failed to execute bash command: ${error.message}`, error);
-        return { result: `Error: ${error.message}` };
+      } catch (err: any) {
+        logger.error(`Failed to execute bash command: ${err instanceof Error ? err.message : String(err)}`, err);
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   };
@@ -304,7 +291,7 @@ export function registerTools(
 
       try {
         if (!clientConnection.terminalOutput) {
-          return { result: `Error: Terminal output not supported by the current client connection.` };
+          throw new Error('Terminal output not supported by the current client connection.');
         }
         const outputResponse = await clientConnection.terminalOutput({
           sessionId: acpSessionId,
@@ -313,10 +300,10 @@ export function registerTools(
         return {
           result: outputToMarkdown(outputResponse),
           location: { path: 'terminal', line: 0 } as ToolCallLocation,
-        }; // Use helper function
-      } catch (error: any) {
-        logger.error(`Failed to get terminal output for ${input.id}: ${error.message}`, error);
-        return { result: `Error: Failed to get terminal output: ${error.message}` };
+        };
+      } catch (err: any) {
+        logger.error(`Failed to get terminal output for ${input.id}: ${err instanceof Error ? err.message : String(err)}`, err);
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   };
@@ -348,7 +335,7 @@ export function registerTools(
 
       try {
         if (!clientConnection.killTerminalCommand) {
-          return { result: `Error: Killing terminals not supported by the current client connection.` };
+          throw new Error('Killing terminals not supported by the current client connection.');
         }
         await clientConnection.killTerminalCommand({
           sessionId: acpSessionId,
@@ -359,9 +346,9 @@ export function registerTools(
           result: `Terminal with ID ${input.id} killed successfully.`,
           location: { path: 'terminal', line: 0 } as ToolCallLocation,
         };
-      } catch (error: any) {
-        logger.error(`Failed to kill terminal ${input.id}: ${error.message}`, error);
-        return { result: `Error: Failed to kill terminal ${input.id}: ${error.message}` };
+      } catch (err: any) {
+        logger.error(`Failed to kill terminal ${input.id}: ${err instanceof Error ? err.message : String(err)}`, err);
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   };
@@ -386,41 +373,46 @@ export function registerTools(
         return { result: `Error: ${error}` };
       }
 
-      const entries = input.todos
-        .split('\n')
-        .filter((line) => line.trim() !== '')
-        .map((line) => {
-          const id = uuidv4();
-          let status: 'pending' | 'in_progress' | 'completed' = 'pending';
-          let description = line.trim();
+      try {
+        const entries = input.todos
+          .split('\n')
+          .filter((line) => line.trim() !== '')
+          .map((line) => {
+            const id = uuidv4();
+            let status: 'pending' | 'in_progress' | 'completed' = 'pending';
+            let description = line.trim();
 
-          if (description.startsWith('[x]')) {
-            status = 'completed';
-            description = description.substring(3).trim();
-          } else if (description.startsWith('[-]')) {
-            status = 'in_progress';
-            description = description.substring(3).trim();
-          } else if (description.startsWith('[ ]')) {
-            status = 'pending';
-            description = description.substring(3).trim();
-          }
+            if (description.startsWith('[x]')) {
+              status = 'completed';
+              description = description.substring(3).trim();
+            } else if (description.startsWith('[-]')) {
+              status = 'in_progress';
+              description = description.substring(3).trim();
+            } else if (description.startsWith('[ ]')) {
+              status = 'pending';
+              description = description.substring(3).trim();
+            }
 
-          return { id, description, status, content: description, priority: 'medium' as const };
-        });
+            return { id, description, status, content: description, priority: 'medium' as const };
+          });
 
-      const notification: SessionNotification = {
-        sessionId: acpSessionId,
-        update: {
-          sessionUpdate: 'plan',
-          entries: entries,
-        },
-      };
-      clientConnection.sessionUpdate(notification);
+        const notification: SessionNotification = {
+          sessionId: acpSessionId,
+          update: {
+            sessionUpdate: 'plan',
+            entries: entries,
+          },
+        };
+        clientConnection.sessionUpdate(notification);
 
-      return {
-        result: 'TODO list updated successfully.',
-        location: { path: 'todo_list', line: 0 } as ToolCallLocation,
-      };
+        return {
+          result: 'TODO list updated successfully.',
+          location: { path: 'todo_list', line: 0 } as ToolCallLocation,
+        };
+      } catch (err: any) {
+        logger.error(`Failed to update todo list: ${err instanceof Error ? err.message : String(err)}`, err);
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}` };
+      }
     },
   };
   opencodeClient.tool.register(updateTodoListTool);
@@ -451,8 +443,6 @@ export function registerTools(
       }
 
       try {
-        // Using agent_message_chunk with a JSON string as content as a workaround for extNotification
-        // The client will need to parse this specific JSON structure to show the toast.
         const notification: SessionNotification = {
           sessionId: acpSessionId,
           update: {
@@ -468,13 +458,12 @@ export function registerTools(
           },
         };
         clientConnection.sessionUpdate(notification);
-
         return {
           result: `Toast notification sent: "${input.message}" with variant "${input.variant}"`,
         };
-      } catch (error: any) {
-        logger.error(`Failed to send toast notification: ${error.message}`, error);
-        return { result: `Error: ${error.message}` };
+      } catch (err: any) {
+        logger.error(`Failed to send toast notification: ${err instanceof Error ? err.message : String(err)}`, err);
+        return { result: `Error: ${err instanceof Error ? err.message : String(err)}` };
       }
     },
   };

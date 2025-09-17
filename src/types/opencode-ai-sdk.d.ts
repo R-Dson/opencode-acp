@@ -9,34 +9,6 @@ declare module '@opencode-ai/sdk' {
     argumentHint?: string;
   }
 
-  export interface OpencodeClient {
-    command: {
-      list(): Promise<Command[]>;
-    };
-    session: {
-      create(options: { body: { title: string } }): Promise<{ id: string }>;
-      prompt(options: {
-        path: { id: string };
-        body: { parts: any[]; model?: string };
-      }): Promise<any>;
-      get(options: { path: { id: string } }): Promise<Session>;
-      messages(options: { path: { id: string } }): Promise<Message[]>;
-      shell(options: {
-        path: { id: string };
-        body: { command: string; args?: string[]; cwd?: string };
-      }): Promise<any>;
-    };
-    mcp: {
-      connect(options: { body: { url: string; type: 'stdio' | 'http' } }): Promise<any>;
-    };
-    tool: {
-      read_file(input: { path: string }): Promise<{ result: string }>;
-      // Add other tool methods as needed
-    };
-    config: {
-      get(): Promise<{ model?: string }>;
-    };
-  }
 
   export function createOpencodeClient(options: any): OpencodeClient;
   export function createOpencodeServer(options: any): Promise<{ url: string; close: () => void }>;

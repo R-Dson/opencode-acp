@@ -38,7 +38,7 @@ export class TaskOrchestrator {
   private logger: Logger;
   private currentSessionId: string | null = null;
   // The 'sessions' map stores information about active ACP sessions.
-  // 'currentMode' here refers to the ACP session mode, which aligns with the
+  // 'currentMode' here refers to the 'ACP session mode, which aligns with the
   // external agent-client-protocol's concept of modes.
   private sessions: Map<string, { cancelled: boolean; currentMode: string; cwd?: string }>;
 
@@ -106,13 +106,18 @@ export class TaskOrchestrator {
       });
     }
 
-    const sessionId = `session-${Date.now()}`;
-    this.currentSessionId = sessionId;
     const initialCwd = params.cwd || undefined; // ACP NewSessionRequest might include cwd
 
+    await this._connectMcpServers(params.mcpServers);
+
+    const sessionId = await this.opencodeAdapter.createOpenCodeSession();
+    this.currentSessionId = sessionId;
     this.sessions.set(sessionId, { cancelled: false, currentMode: 'default', cwd: initialCwd });
 
-    await this._connectMcpServers(params.mcpServers);
+
+    // Register tools and fetch slash commands after the session is created
+    await this.opencodeAdapter.registerTools();
+    await this.opencodeAdapter.fetchAndRegisterSlashCommands(sessionId);
 
     return {
       sessionId: sessionId,
@@ -158,31 +163,14 @@ export class TaskOrchestrator {
         case 'resource_link':
           this.logger.info(`Processing resource link: ${contentBlock.uri}`);
           try {
-            // For resource_link, we need to read the file content
-            let fileContentText = '';
-            const fileContentIterator = this.opencodeAdapter.executeStep(
-              {
-                kind: 'read',
-                name: 'file',
-                rawInput: { path: contentBlock.uri },
-              },
-              params.sessionId,
-            );
-            for await (const chunk of fileContentIterator) {
-              if (
-                chunk &&
-                'sessionUpdate' in chunk &&
-                chunk.sessionUpdate === 'agent_message_chunk' &&
-                chunk.content &&
-                'text' in chunk.content
-              ) {
-                fileContentText += chunk.content.text;
-              }
-            }
+            const result = await this.clientConnection.readTextFile({
+              path: contentBlock.uri,
+              sessionId: params.sessionId,
+            });
             this.logger.info(`Resource content fetched for ${contentBlock.uri}`);
             processedPromptParts.push({
               type: 'text',
-              text: `File: ${contentBlock.uri}\n\`\`\`\n${fileContentText}\n\`\`\``,
+              text: `File: ${contentBlock.uri}\n\`\`\`\n${result.content}\n\`\`\``,
             });
           } catch (error: unknown) {
             const errorMessage = error instanceof Error ? error.message : String(error);
@@ -198,7 +186,6 @@ export class TaskOrchestrator {
           break;
         case 'resource':
           this.logger.info(`Processing embedded resource: ${contentBlock.resource.uri}`);
-          // Embedded resources already have their content
           if ('text' in contentBlock.resource) {
             processedPromptParts.push({
               type: 'text',
@@ -217,8 +204,13 @@ export class TaskOrchestrator {
     }
 
     if (processedPromptParts.length > 0) {
+      let toolCallSuccess = false;
+      let toolCallError: string | undefined;
+      let toolCallOutput: any;
+      let promptStep: { kind: string; name: string; rawInput: { parts: ContentBlock[] } } | undefined;
+
       try {
-        const promptStep = {
+        promptStep = {
           kind: 'prompt',
           name: 'user_message',
           rawInput: {
@@ -226,26 +218,18 @@ export class TaskOrchestrator {
           },
         };
 
-        const resultIterator = await this.opencodeAdapter.executeStep(promptStep, params.sessionId);
-
-        for await (const chunk of resultIterator) {
-          if ('stopReason' in chunk) {
-            // This is the final chunk with the stop reason
-            this.logger.info('Prompt execution completed');
-            return { stopReason: chunk.stopReason };
-          } else {
-            this.clientConnection.sessionUpdate({
-              sessionId: params.sessionId,
-              update: chunk, // chunk is already the SessionNotification['update'] object
-            });
-          }
-        }
-        // Should not reach here if stopReason is always yielded.
-        this.logger.warn('Prompt execution completed without explicit stopReason.');
+        // The global event subscription in OpenCodeAdapter handles all streaming.
+        // We just need to wait for the prompt to complete here.
+        await this.opencodeAdapter.executeStep(promptStep, params.sessionId);
+        toolCallSuccess = true;
+        toolCallOutput = { stopReason: 'end_turn' };
+        this.logger.info('Prompt execution completed.');
         return { stopReason: 'end_turn' };
       } catch (error: any) {
-        this.logger.error(`Error executing prompt: ${error instanceof Error ? error.message : String(error)}`, error);
-        throw new RequestError(-32000, `Error executing prompt: ${error instanceof Error ? error.message : String(error)}`);
+        toolCallSuccess = false;
+        toolCallError = error instanceof Error ? error.message : String(error);
+        this.logger.error(`Error executing prompt: ${toolCallError}`, error);
+        throw new RequestError(-32000, `Error executing prompt: ${toolCallError}`);
       }
     } else {
       return { stopReason: 'end_turn' };
@@ -258,6 +242,13 @@ export class TaskOrchestrator {
     if (session) {
       session.cancelled = true;
       this.logger.info(`Session ${params.sessionId} marked as cancelled.`);
+      this.opencodeAdapter.clearStreamingState(params.sessionId);
+      try {
+        await this.opencodeAdapter.abortSession(params.sessionId);
+        this.logger.info(`OpenCode session for ACP session ${params.sessionId} aborted.`);
+      } catch (error: unknown) {
+        this.logger.error(`Failed to abort OpenCode session for ACP session ${params.sessionId}: ${error instanceof Error ? error.message : String(error)}`, error);
+      }
       try {
         this.clientConnection.sessionUpdate({
           sessionId: params.sessionId,
@@ -380,6 +371,10 @@ export class TaskOrchestrator {
   public getCurrentSessionMode(sessionId: string): string {
     const session = this.sessions.get(sessionId);
     return session?.currentMode || 'default';
+  }
+
+  public getCurrentSessionId(): string | null {
+    return this.currentSessionId;
   }
 
   async handleSetModel(params: SetModelRequest): Promise<SetModelResponse> {

@@ -67,3 +67,28 @@ export interface AgentStartNotification {
 export interface TaskCreateNotification {
   [key: string]: unknown;
 }
+
+export interface ToolCallStartedEvent {
+  type: 'tool_call_started';
+  toolName: string;
+  input: any;
+  sessionId: string;
+  timestamp: string;
+}
+
+export interface ToolCallEndedEvent {
+  type: 'tool_call_ended';
+  toolName: string;
+  output: any;
+  sessionId: string;
+  timestamp: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface SessionData {
+  opencodeId: string;
+  cancelled: boolean;
+  currentMode: string;
+  cwd?: string;
+}
