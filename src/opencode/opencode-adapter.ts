@@ -42,8 +42,8 @@ export class OpenCodeAdapter {
   private serverReady: Promise<void>;
   private taskOrchestrator: TaskOrchestrator;
   public sessionMap = new Map<string, SessionData>();
-  private streamingTextState = new Map<string, { text: string; reasoning: string; textBuffer: string; reasoningBuffer: string; }>();
-  private readonly CHUNK_SIZE = 50; // Send chunks of at least 50 characters
+  private streamingTextState = new Map<string, { text: string; reasoning: string; textBuffer: string; reasoningBuffer: string }>();
+  private readonly CHUNK_SIZE = 0; // Send chunks of at least this many characters
 
   constructor(
     logger: Logger,
@@ -107,6 +107,11 @@ export class OpenCodeAdapter {
                           break;
 
                         case 'text':
+                          const messageRole = event.properties.info?.role;
+                          if (messageRole === 'user') {
+                            this.logger.debug(`Skipping text part from user role: ${messageRole}`);
+                            break;
+                          }
                           delta = part.text.substring(state.text.length);
                           state.text = part.text;
                           if (delta) {
@@ -211,8 +216,6 @@ export class OpenCodeAdapter {
                       );
                     }
                     break;
-                  
-                    break;
                   case 'session.mode.changed':
                     // Forward current mode update
                     sessionNotification = {
@@ -291,16 +294,8 @@ export class OpenCodeAdapter {
                       },
                     };
                     break;
-                  case 'server.connected':
-                    sessionNotification = {
-                      sessionUpdate: 'agent_message_chunk',
-                      content: {
-                        type: 'text',
-                        text: `[OpenCode Event: ${event.type}] ${JSON.stringify(event.properties)}`,
-                      },
-                    };
-                    break;
                   
+                  case 'session.idle':
                   case 'message.finalized':
                     // Reset all streaming state when a message is finalized
                     const finalizedSessionId = event.properties.sessionId || this.taskOrchestrator.getCurrentSessionId();
@@ -315,13 +310,13 @@ export class OpenCodeAdapter {
                       }
                     }
                     break;
+                  case 'server.connected':
                   case 'installation.updated':
                   case 'lsp.client.diagnostics':
                   case 'session.compacted':
                   case 'permission.updated':
                   case 'permission.replied':
                   case 'session.error':
-                  case 'session.idle':
                   case 'message.updated':
                   case 'session.updated':
                     break;
