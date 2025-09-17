@@ -16,7 +16,7 @@ import {
 import { registerTools as registerToolsFn } from './tools.js';
 import { mapToolCodeToAcpToolCall, mapToolOutputToAcpContent } from './acp-mappers.js';
 import { TaskOrchestrator } from '../agent/task-orchestrator.js';
-import { AVAILABLE_SLASH_COMMANDS } from '../../docs/slash-commands.js';
+import { AVAILABLE_SLASH_COMMANDS } from '../utils/slash-commands.js';
 
 
 export interface ReadStepInput {
