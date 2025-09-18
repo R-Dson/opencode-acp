@@ -108,8 +108,8 @@ export class OpenCodeAdapter {
 
                         case 'text':
                           const messageRole = event.properties.info?.role;
-                          if (messageRole === 'user' || messageRole === undefined) {
-                            this.logger.debug(`Skipping text part from user/undefined role: ${messageRole}`);
+                          if (!part.time) {
+                            this.logger.debug(`Skipping text part with no time object: ${part.text}`);
                             break;
                           }
                           delta = part.text.substring(state.text.length);
